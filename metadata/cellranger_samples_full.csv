@@ -1,0 +1,5 @@
+sample_id,gsm_id,fastq_dir,n_runs,runs,age,tissue,tumor_type,source_name,cell_type
+primary_tumor_001,GSM6619234,fastq/cellranger/primary_tumor_001,4,"SRR21832365,SRR21832366,SRR21832367,SRR21832368",73 years,"Brain tumor\, enzymatically dissociated",primary tumor,"Brain tumor\, enzymatically dissociated",Glioblastoma
+recurrent_tumor_001,GSM6619235,fastq/cellranger/recurrent_tumor_001,4,"SRR21832360,SRR21832361,SRR21832362,SRR21832363",58 years,"Brain tumor\, enzymatically dissociated",recurrent tumor,"Brain tumor\, enzymatically dissociated",Glioblastoma
+primary_tumor_002,GSM6619236,fastq/cellranger/primary_tumor_002,2,"SRR21832358,SRR21832359",71 years,"Brain tumor\, enzymatically dissociated",primary tumor,"Brain tumor\, enzymatically dissociated",Glioblastoma
+primary_tumor_003,GSM6619237,fastq/cellranger/primary_tumor_003,4,"SRR21832356,SRR21832357,SRR21832364,SRR21832369",67 years,"Brain tumor\, enzymatically dissociated",primary tumor,"Brain tumor\, enzymatically dissociated",Glioblastoma

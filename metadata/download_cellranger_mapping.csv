@@ -1,0 +1,5 @@
+gsm_id,sample_name,tumor_type,age,tissue,source_name
+GSM6619234,primary_tumor_001,primary tumor,73 years,"Brain tumor\, enzymatically dissociated","Brain tumor\, enzymatically dissociated"
+GSM6619236,primary_tumor_002,primary tumor,71 years,"Brain tumor\, enzymatically dissociated","Brain tumor\, enzymatically dissociated"
+GSM6619237,primary_tumor_003,primary tumor,67 years,"Brain tumor\, enzymatically dissociated","Brain tumor\, enzymatically dissociated"
+GSM6619235,recurrent_tumor_001,recurrent tumor,58 years,"Brain tumor\, enzymatically dissociated","Brain tumor\, enzymatically dissociated"

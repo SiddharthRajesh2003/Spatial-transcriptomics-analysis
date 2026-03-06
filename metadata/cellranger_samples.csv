@@ -1,0 +1,5 @@
+sample_id,fastq_dir
+primary_tumor_001,fastq/cellranger/primary_tumor_001
+recurrent_tumor_001,fastq/cellranger/recurrent_tumor_001
+primary_tumor_002,fastq/cellranger/primary_tumor_002
+primary_tumor_003,fastq/cellranger/primary_tumor_003

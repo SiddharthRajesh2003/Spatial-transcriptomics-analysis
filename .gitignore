@@ -1,0 +1,6 @@
+singularity.md
+results/
+.claude
+h5ad_files
+*.tar.gz
+*.tar

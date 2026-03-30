@@ -4,3 +4,6 @@ results/
 h5ad_files
 *.tar.gz
 *.tar
+*.h5ad
+*.pdf
+Single_cell_Lymph_spleen.ipynb

@@ -1,0 +1,509 @@
+---
+title: "GBM Downstream Analysis: Primary vs Recurrent TME"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    embed-resources: true
+    theme: flatly
+jupyter: python3
+---
+
+# Setup
+
+```{python}
+import scanpy as sc
+import decoupler as dc
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import seaborn as sns
+import warnings
+import os
+
+warnings.filterwarnings("ignore")
+pd.options.future.infer_string = False
+
+sc.settings.verbosity = 0
+sc.set_figure_params(dpi=100, facecolor="white", frameon=False)
+```
+
+# Load Annotated Data
+
+```{python}
+adata = sc.read_h5ad("h5ad_files/annotated.h5ad")
+
+# Sanity check
+print(adata)
+print("\nCell types:", adata.obs["cell_type"].unique().tolist())
+print("Conditions:", adata.obs["condition"].unique().tolist())
+print("Samples:", adata.obs["sample"].unique().tolist())
+print("\nCells per sample:")
+print(adata.obs.groupby(["sample", "condition"]).size())
+```
+
+# Cell Type Composition
+
+## Overall proportions per sample
+
+```{python}
+# Compute proportions within each sample
+comp = (
+    adata.obs
+    .groupby(["sample", "condition", "cell_type"], observed=True)
+    .size()
+    .reset_index(name="n")
+)
+comp["proportion"] = comp.groupby("sample")["n"].transform(lambda x: x / x.sum())
+
+# Consistent cell type colour palette
+cell_types_ordered = [
+    "Tumor", "Microglia", "TAM_APOE", "TAM_SPP1", "TAM_macrophage",
+    "Monocyte", "CD8_T_cell", "OPC", "Oligodendrocyte", "Endothelial"
+]
+palette = dict(zip(cell_types_ordered, sns.color_palette("tab10", len(cell_types_ordered))))
+
+fig, ax = plt.subplots(figsize=(10, 5))
+pivot = comp.pivot_table(index="sample", columns="cell_type", values="proportion", fill_value=0)
+pivot = pivot.reindex(columns=cell_types_ordered, fill_value=0)
+
+# Sort samples: primaries first, recurrent last
+sample_order = sorted(pivot.index, key=lambda x: (0 if "primary" in x else 1, x))
+pivot = pivot.loc[sample_order]
+
+pivot.plot(kind="bar", stacked=True, ax=ax, color=[palette.get(c, "grey") for c in pivot.columns], width=0.7)
+ax.set_ylabel("Proportion of cells")
+ax.set_xlabel("")
+ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=9, title="Cell type")
+
+# Mark condition boundary
+n_primary = sum("primary" in s for s in sample_order)
+ax.axvline(n_primary - 0.5, color="black", linestyle="--", linewidth=1.2, label="recurrence →")
+ax.set_title("Cell type composition per sample")
+plt.tight_layout()
+plt.show()
+```
+
+## Primary vs Recurrent — mean proportions
+
+```{python}
+mean_comp = (
+    comp.groupby(["condition", "cell_type"], observed=True)["proportion"]
+    .mean()
+    .reset_index()
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+for ax, cond in zip(axes, ["primary", "recurrent"]):
+    sub = (mean_comp[mean_comp["condition"] == cond]
+           .set_index("cell_type")[["proportion"]]
+           .reindex(cell_types_ordered, fill_value=0))
+    bars = ax.barh(sub.index, sub["proportion"],
+                   color=[palette.get(c, "grey") for c in sub.index])
+    ax.set_xlim(0, 0.75)
+    ax.set_title(f"{cond.capitalize()} (n={'3' if cond=='primary' else '1'})")
+    ax.set_xlabel("Mean proportion")
+    ax.xaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+    ax.invert_yaxis()
+
+plt.suptitle("Mean cell type proportions by condition", y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+## Raw cell counts per condition
+
+```{python}
+counts_tbl = (
+    adata.obs
+    .groupby(["condition", "cell_type"], observed=True)
+    .size()
+    .unstack(fill_value=0)
+)
+counts_tbl = counts_tbl.reindex(columns=cell_types_ordered, fill_value=0)
+
+display(counts_tbl.style
+        .background_gradient(axis=1, cmap="Blues")
+        .format("{:,}"))
+```
+
+# TAM Subtype Analysis
+
+> TAMs were sub-clustered into four states: **TAM_APOE** (immunosuppressive), **TAM_SPP1**
+> (pro-tumorigenic), **TAM_macrophage** (intermediate), and **Monocyte** (infiltrating).
+> Neither Paper 1 nor Paper 2 resolved TAMs at this resolution.
+
+## TAM proportion shifts primary → recurrent
+
+```{python}
+tam_types = ["TAM_APOE", "TAM_SPP1", "TAM_macrophage", "Monocyte"]
+
+tam_comp = (
+    adata.obs[adata.obs["cell_type"].isin(tam_types)]
+    .groupby(["sample", "condition", "cell_type"], observed=True)
+    .size()
+    .reset_index(name="n")
+)
+tam_comp["tam_proportion"] = (
+    tam_comp.groupby("sample")["n"].transform(lambda x: x / x.sum())
+)
+
+fig, ax = plt.subplots(figsize=(8, 4))
+tam_palette = dict(zip(tam_types, sns.color_palette("Set2", 4)))
+pivot_tam = tam_comp.pivot_table(
+    index="sample", columns="cell_type", values="tam_proportion", fill_value=0
+)
+pivot_tam = pivot_tam.reindex(columns=tam_types, fill_value=0)
+pivot_tam = pivot_tam.loc[sample_order]
+
+pivot_tam.plot(kind="bar", stacked=True, ax=ax,
+               color=[tam_palette[c] for c in pivot_tam.columns], width=0.7)
+ax.axvline(n_primary - 0.5, color="black", linestyle="--", linewidth=1.2)
+ax.set_ylabel("Proportion within TAMs")
+ax.set_xlabel("")
+ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+ax.legend(bbox_to_anchor=(1.01, 1), loc="upper left", fontsize=9, title="TAM subtype")
+ax.set_title("TAM subtype composition per sample")
+plt.tight_layout()
+plt.show()
+```
+
+## TAM subtype marker genes
+
+```{python}
+tam_markers = {
+    "TAM_APOE":       ["APOE", "CD163", "SPP1", "C1QA", "C1QB"],
+    "TAM_SPP1":       ["SPP1", "CD14", "CCL2", "VEGFA", "MMP9"],
+    "TAM_macrophage": ["CD68", "CD163", "MRC1", "CSF1R", "ITGAM"],
+    "Monocyte":       ["CD14", "FCGR3A", "CX3CR1", "S100A8", "S100A9"],
+}
+
+tams = adata[adata.obs["cell_type"].isin(tam_types)].copy()
+sc.pl.dotplot(
+    tams, tam_markers, groupby="cell_type",
+    standard_scale="var", swap_axes=False,
+    title="TAM subtype marker expression"
+)
+```
+
+# UMAP — Condition and Cell Type
+
+## Primary vs Recurrent split
+
+```{python}
+cond_palette = {"primary": "#4C72B0", "recurrent": "#DD8452"}
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Primaries greyed out, recurrent highlighted
+sc.pl.umap(adata, color="condition", palette=cond_palette,
+           groups=["recurrent"], na_color="#DDDDDD",
+           ax=axes[0], show=False,
+           title="Recurrent cells highlighted")
+
+# Full condition split with equal weight
+sc.pl.umap(adata, color="condition", palette=cond_palette,
+           ax=axes[1], show=False,
+           title="Condition (primary vs recurrent)")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Condition split per cell type
+
+```{python}
+# One panel per cell type — shows where recurrent cells sit within each cluster
+fig, axes = plt.subplots(2, 5, figsize=(20, 8))
+axes = axes.flatten()
+
+for ax, ct in zip(axes, cell_types_ordered):
+    sub = adata[adata.obs["cell_type"] == ct].copy()
+    sc.pl.umap(adata, ax=ax, show=False, color="cell_type",
+               groups=[ct], na_color="#EEEEEE", legend_loc=None)
+    # Overlay condition colours for this cell type only
+    for cond, col in cond_palette.items():
+        mask = sub.obs["condition"] == cond
+        coords = sub[mask.values].obsm["X_umap"]
+        ax.scatter(coords[:, 0], coords[:, 1], s=2, alpha=0.6,
+                   color=col, label=cond, rasterized=True)
+    ax.set_title(ct, fontsize=9)
+    ax.set_xlabel(""); ax.set_ylabel("")
+
+# shared legend on last panel
+axes[-1].legend(*axes[0].get_legend_handles_labels(),
+                loc="center", fontsize=9, title="Condition",
+                markerscale=4)
+
+plt.suptitle("Primary (blue) vs Recurrent (orange) within each cell type", y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+## Integration check — sample separation
+
+> **Note:** In the sample-coloured UMAP, `primary_001` appears largely isolated in
+> its own region, suggesting scVI did not fully integrate it with the other primary
+> samples. Check whether this reflects biology (a biologically distinct tumour) or
+> a residual batch effect before interpreting primary vs recurrent differences.
+
+```{python}
+sample_palette = {
+    "primary_001":  "#1f77b4",
+    "primary_002":  "#2ca02c",
+    "primary_003":  "#ff7f0e",
+    "recurrent_001":"#d62728",
+}
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+sc.pl.umap(adata, color="sample", palette=sample_palette,
+           ax=axes[0], show=False, title="All samples")
+
+# primary_001 vs rest
+adata.obs["primary_001_flag"] = adata.obs["sample"].apply(
+    lambda x: "primary_001" if x == "primary_001" else "other"
+)
+sc.pl.umap(adata, color="primary_001_flag",
+           palette={"primary_001": "#1f77b4", "other": "#DDDDDD"},
+           ax=axes[1], show=False,
+           title="primary_001 isolated (possible batch outlier?)")
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# QC check: are primary_001 cells different quality?
+qc_cols = ["n_genes_by_counts", "total_counts", "pct_counts_mt"]
+available_qc = [c for c in qc_cols if c in adata.obs.columns]
+
+if available_qc:
+    sc.pl.violin(adata, available_qc, groupby="sample",
+                 multi_panel=True, jitter=0.2, stripplot=False,
+                 rotation=30)
+else:
+    print("QC metrics not stored in obs — re-run sc.pp.calculate_qc_metrics if needed.")
+```
+
+# Differential Expression: Primary vs Recurrent
+
+> **Statistical note:** With n=3 primary and n=1 recurrent sample, pseudobulk DE
+> is underpowered — variance cannot be estimated from a single replicate.
+> Below we use a **per-cell Wilcoxon rank-sum test** (all cells pooled within condition)
+> which provides gene rankings but inflates significance due to pseudoreplication.
+> Treat results as hypothesis-generating, not confirmatory.
+
+## Tumor cells
+
+```{python}
+tumor = adata[adata.obs["cell_type"] == "Tumor"].copy()
+
+sc.tl.rank_genes_groups(
+    tumor,
+    groupby="condition",
+    groups=["recurrent"],
+    reference="primary",
+    method="wilcoxon",
+    layer="counts",
+    use_raw=False,
+    key_added="de_tumor"
+)
+
+de_tumor = sc.get.rank_genes_groups_df(tumor, group="recurrent", key="de_tumor")
+de_tumor = de_tumor.rename(columns={"names": "gene"})
+
+print(f"Upregulated in recurrent Tumor (logFC > 0.5, p_adj < 0.05): "
+      f"{((de_tumor.logfoldchanges > 0.5) & (de_tumor.pvals_adj < 0.05)).sum()}")
+print(f"Downregulated in recurrent Tumor (logFC < -0.5, p_adj < 0.05): "
+      f"{((de_tumor.logfoldchanges < -0.5) & (de_tumor.pvals_adj < 0.05)).sum()}")
+
+display(de_tumor.head(20))
+```
+
+### Volcano plot — Tumor cells
+
+```{python}
+fig, ax = plt.subplots(figsize=(8, 6))
+
+de = de_tumor.copy()
+de["-log10_padj"] = -np.log10(de["pvals_adj"].clip(lower=1e-300))
+de["sig"] = (de["pvals_adj"] < 0.05) & (de["logfoldchanges"].abs() > 0.5)
+
+ax.scatter(de.loc[~de["sig"], "logfoldchanges"],
+           de.loc[~de["sig"], "-log10_padj"],
+           alpha=0.3, s=8, color="lightgrey")
+up   = de[de["sig"] & (de["logfoldchanges"] > 0)]
+down = de[de["sig"] & (de["logfoldchanges"] < 0)]
+ax.scatter(up["logfoldchanges"],   up["-log10_padj"],   alpha=0.7, s=12, color="#DD8452", label=f"Up in recurrent ({len(up)})")
+ax.scatter(down["logfoldchanges"], down["-log10_padj"], alpha=0.7, s=12, color="#4C72B0", label=f"Up in primary ({len(down)})")
+
+# Label top 10 each direction
+for _, row in pd.concat([up.nlargest(10, "-log10_padj"), down.nlargest(10, "-log10_padj")]).iterrows():
+    ax.text(row["logfoldchanges"], row["-log10_padj"], row["gene"],
+            fontsize=7, ha="left", va="bottom")
+
+ax.axvline(0.5,  color="black", linestyle="--", linewidth=0.8)
+ax.axvline(-0.5, color="black", linestyle="--", linewidth=0.8)
+ax.axhline(-np.log10(0.05), color="black", linestyle=":", linewidth=0.8)
+ax.set_xlabel("log2 fold change (recurrent vs primary)")
+ax.set_ylabel("-log10 adjusted p-value")
+ax.set_title("Tumor cells: recurrent vs primary")
+ax.legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+```
+
+### Top recurrence-upregulated genes in Tumor cells
+
+```{python}
+top_up_tumor = de_tumor[de_tumor["logfoldchanges"] > 0].nsmallest(6, "pvals_adj")["gene"].tolist()
+
+sc.pl.violin(
+    tumor, top_up_tumor,
+    groupby="condition",
+    use_raw=False, layer="counts",
+    palette={"primary": "#4C72B0", "recurrent": "#DD8452"},
+    multi_panel=True,
+    jitter=0.2, stripplot=True
+)
+```
+
+## TAM cells (all subtypes pooled)
+
+```{python}
+tam_all = adata[adata.obs["cell_type"].isin(tam_types)].copy()
+
+sc.tl.rank_genes_groups(
+    tam_all,
+    groupby="condition",
+    groups=["recurrent"],
+    reference="primary",
+    method="wilcoxon",
+    layer="counts",
+    use_raw=False,
+    key_added="de_tam"
+)
+
+de_tam = sc.get.rank_genes_groups_df(tam_all, group="recurrent", key="de_tam")
+de_tam = de_tam.rename(columns={"names": "gene"})
+
+print(f"Upregulated in recurrent TAMs (logFC > 0.5, p_adj < 0.05): "
+      f"{((de_tam.logfoldchanges > 0.5) & (de_tam.pvals_adj < 0.05)).sum()}")
+
+display(de_tam.head(20))
+```
+
+### Top recurrence-upregulated genes in TAMs
+
+```{python}
+top_up_tam = de_tam[de_tam["logfoldchanges"] > 0].nsmallest(6, "pvals_adj")["gene"].tolist()
+
+sc.pl.violin(
+    tam_all, top_up_tam,
+    groupby="condition",
+    use_raw=False, layer="counts",
+    palette={"primary": "#4C72B0", "recurrent": "#DD8452"},
+    multi_panel=True,
+    jitter=0.2, stripplot=True
+)
+```
+
+# Pseudobulk Aggregation
+
+Aggregate raw counts per sample × cell type. This is the input you would use for
+a proper pseudobulk DE tool (e.g. DESeq2) once more recurrent replicates are available.
+
+```{python}
+psbulk = dc.pp.pseudobulk(
+    adata,
+    sample_col="sample",
+    groups_col="cell_type",
+    layer="counts",
+    mode="sum"
+)
+
+print("Pseudobulk object:")
+print(psbulk)
+print("\nCells per pseudobulk sample:")
+print(psbulk.obs[["psbulk_cells", "psbulk_counts"]].to_string())
+```
+
+## QC: cells per pseudobulk sample
+
+```{python}
+fig, ax = plt.subplots(figsize=(10, 4))
+psbulk.obs["label"] = psbulk.obs.index.astype(str)
+psbulk.obs["condition"] = psbulk.obs["label"].apply(
+    lambda x: "recurrent" if "recurrent" in x else "primary"
+)
+
+sns.barplot(
+    data=psbulk.obs.sort_values("psbulk_cells", ascending=False),
+    x="label", y="psbulk_cells",
+    hue="condition",
+    palette={"primary": "#4C72B0", "recurrent": "#DD8452"},
+    ax=ax
+)
+ax.set_xlabel("")
+ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+ax.set_ylabel("Number of cells")
+ax.set_title("Cells per pseudobulk sample (sample × cell type)")
+ax.get_legend().set_title("Condition")
+plt.tight_layout()
+plt.show()
+```
+
+# SPP1 Signalling Check
+
+> Paper 2 identified **SPP1→CD44** as the strongest ECM poor-prognosis LR pair.
+> Check whether this signal differs between primary and recurrent in our data.
+
+```{python}
+genes_of_interest = ["SPP1", "CD44", "FN1", "ITGAV", "ITGB1", "COL4A5", "COL6A1",
+                     "LAMA2", "LAMA4", "LAMB1", "LAMC1", "LAMC3"]
+
+# Keep only genes present in the dataset
+genes_of_interest = [g for g in genes_of_interest if g in adata.var_names]
+print("Genes found:", genes_of_interest)
+
+sc.pl.dotplot(
+    adata, genes_of_interest,
+    groupby="cell_type",
+    standard_scale="var",
+    swap_axes=True,
+    title="Paper 2 ECM poor-prognosis LR genes across cell types"
+)
+```
+
+```{python}
+# Expression of SPP1 and CD44 per condition and cell type
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+for ax, gene in zip(axes, ["SPP1", "CD44"]):
+    if gene not in adata.var_names:
+        ax.set_title(f"{gene} not found")
+        continue
+    expr = pd.DataFrame({
+        "expr":      adata[:, gene].layers["counts"].toarray().flatten(),
+        "cell_type": adata.obs["cell_type"].values,
+        "condition": adata.obs["condition"].values,
+    })
+    mean_expr = expr.groupby(["cell_type", "condition"])["expr"].mean().reset_index()
+    mean_expr = mean_expr[mean_expr["cell_type"].isin(cell_types_ordered)]
+
+    sns.barplot(
+        data=mean_expr, x="cell_type", y="expr", hue="condition",
+        palette={"primary": "#4C72B0", "recurrent": "#DD8452"},
+        ax=ax
+    )
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Mean raw counts")
+    ax.set_title(f"{gene} expression by cell type and condition")
+    ax.get_legend().set_title("Condition")
+
+plt.tight_layout()
+plt.show()
+```

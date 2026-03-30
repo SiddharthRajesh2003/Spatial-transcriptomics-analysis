@@ -1,0 +1,199 @@
+## Loading the python libraries
+```{python}
+import scvi
+import scanpy as sc
+import squidpy as sq
+import scrublet as scr
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+pd.options.future.infer_string = False  # add this after your imports
+warnings.filterwarnings("ignore")
+
+sc.settings.verbosity = 3
+sc.set_figure_params(dpi=80, facecolor="white")
+```
+
+## Loading the scRNA-seq data
+
+```{python}
+patient_1 = sc.read_10x_h5("results/cellbender/primary_tumor_001/primary_tumor_001_cellbender_filtered.h5")
+patient_2 = sc.read_10x_h5("results/cellbender/primary_tumor_002/primary_tumor_002_cellbender_filtered.h5")
+patient_3 = sc.read_10x_h5("results/cellbender/primary_tumor_003/primary_tumor_003_cellbender_filtered.h5")
+recurrent_1 = sc.read_10x_h5("results/cellbender/recurrent_tumor_001/recurrent_tumor_001_cellbender_filtered.h5")
+```
+
+### Fixing the gene names and adding in the metadata
+
+```{python}
+for adata in [patient_1, patient_2, patient_3, recurrent_1]:
+    adata.var_names_make_unique()
+
+patient_1.obs["sample"] = "patient_001"
+patient_2.obs["sample"] = "patient_002"
+patient_3.obs["sample"] = "patient_003"
+recurrent_1.obs["sample"] = "recurrent_001"
+
+for a in [patient_1, patient_2, patient_3]:
+    a.obs["condition"] = 'primary"
+recurrent_1.obs["condition"] = "recurrent"
+```
+
+## Run Scrublet to remove the doublets
+
+```{python}
+for adata in [patient_1, patient_2, patient_3, recurrent_1]:
+    scrub = scr.Scrublet(adata.X)
+    adata.obs["doublet_score"], adata.obs['predicted_doublet'] = scrub.scrub_doublets()
+```
+
+## Concatenate all the samples into 1 AnnData object
+
+```{python}
+ref = sc.concat([patient_1, patient_2, patient_3, recurrent_1])
+```
+
+#### Filter out the doublets
+
+```{python}
+ref = ref[~ref.obs["predicted_doublet"]].copy()
+ref.obs_names_make_unique()
+```
+
+# Quality Control
+
+```{python}
+# Calculate the percentage of mitochondrial UMIs within the data
+ref.var['mt'] = ref.var_names.str.startswith("MT-") 
+sc.pp.calculate_qc_metrics(ref, qc_vars = ["mt"], inplace = True)
+```
+
+## Violin Plots
+
+```{python}
+sc.pl.violin(ref, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], groupby = 'sample', jitter = 0.5)
+```
+
+## Filtering out low quality cells and genes
+
+```{python}
+sc.pp.filter_cells(ref, min_genes=250)
+sc.pp.filter_genes(ref, min_cells=3)
+ref = ref[ref.obs.pct_counts_mt < 20].copy()
+```
+
+#### Storing raw counts for cell2location
+
+```{python}
+ref.layers["counts"] = ref.X.copy()
+```
+
+## Normalizing the counts matrix and scaling
+
+```{python}
+sc.pp.normalize_total(ref, target_sum=1e-4)
+sc.pp.log1p(ref)
+ref.raw = ref   # Save normalized for plotting
+
+sc.pp.highly_variable_genes(ref, n_top_genes = 3000, batch_key='sample')
+sc.pp.pca(ref)
+```
+
+# Integrating samples using scVI
+
+```{python}
+if (os.path.exists('h5ad_files/scvi_ref.h5ad')):
+    ref = sc.read_h5ad('h5ad_files/scvi_ref.h5ad')
+else:
+    scvi.settings.seed = 42
+    scvi.model.SCVI.setup_anndata(ref, layer = 'counts', batch_key = 'sample')
+    vae = scvi.model.SCVI(ref, n_layers = 2, n_latent = 30)
+    vae.train()
+    ref.obsm['X_scVI'] = vae.get_latent_representations()
+    ref.write_h5ad('h5ad_files/scvi_ref.h5ad')
+```
+
+
+## Calculating neigbours and umap
+
+```{python}
+sc.pp.neighbours(ref, use_rep = "X_scVI")
+sc.tl.umap(ref)
+```
+
+### Running Leiden clustering
+
+```{python}
+# Base leiden for all the clusters
+sc.tl.leiden(ref, resolution = 0.5, key_added = 'leiden')
+
+# Resplit cluster 6 at higher resolution
+sc.tl.leiden(ref, resolution=0.8, restrict_to = ("leider", ['6']), key_added = 'leiden_resplit')
+
+# Looking at the differences between normal leiden split and leiden resplit for cluster 6 at higher resolution
+sc.pl.umap(ref, color = ['leiden', 'leiden_resplit'])
+
+# Plotting the UMAP to see the clustering differences across samples and condition
+sc.pl.umap(ref, color = ['leiden', 'condition', 'sample'])
+
+# Checking the violin plot again for quality control
+
+sc.pl.violin(ref, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], groupby = 'sample', jitter = 0.5)
+```
+
+#### Checking the quality of clusters 12 and 14
+
+```{python}
+sc.pl.violin(ref[ref.obs.leiden.isin(['12', '14'])], [
+    "n_genes_by_counts", "total_counts", "pct_counts_mt"
+])
+```
+
+# Annotation 
+
+## Dotplot of markers genes to annotate cells
+
+```{python}
+gbm_markers = {
+    "Tumor":            ["EGFR", "SOX2", "NES", "CDK4", "PDGFRA"],
+    "Microglia":        ["TMEM119", "P2RY12", "CX3CR1", "HEXB", "SALL1"],
+    "Macrophage":       ["CD68", "CD163", "MRC1", "CSF1R", "ITGAM"],
+    "T_cell":           ["CD3D", "CD3E", "CD8A", "CD4"],
+    "Treg":             ["FOXP3", "IL2RA", "CTLA4"],
+    "NK_cell":          ["GNLY", "NKG7", "KLRD1"],
+    "Oligodendrocyte":  ["MBP", "MOG", "PLP1", "OLIG1"],
+    "OPC":              ["PDGFRA", "OLIG2", "SOX10"],
+    "Astrocyte":        ["GFAP", "AQP4", "S100B", "ALDH1L1"],
+    "Endothelial":      ["PECAM1", "VWF", "CDH5", "CLDN5"],
+    "Pericyte":         ["PDGFRB", "RGS5", "ACTA2"]
+}
+
+sc.pl.dotplot(ref, gbm_markers, groupby='leiden', standard_scale = 'var')
+```
+
+### Identify the discriminating genes per cell type
+
+```{python}
+sc.pl.umap(
+    ref,
+    color=["EGFR", "TMEM119", "CD3D", "MBP", "GFAP", "PECAM1", "leiden"],
+    ncols = 3
+)
+```
+
+## Cell-type map to annotate each cluster
+
+```{python}
+cell_type_map = {
+        "0":  "Tumor", "1": "Tumor", "2": "Tumor",
+    "3":  "Microglia", "4": "OPC", "5": "Tumor",
+    "6":  "Tumor", "7":  "Unknown", "8": "Oligodendrocyte",
+    "9":  "CD8_T_cell", "10": "Oligodendrocyte", "11": "Macrophage",
+    "12": "Unknown", "13": "Tumor", "14": "Tumor",
+    "15": "Unknown", "16": "Unknown", "17": "Endothelial",
+    "18": "Tumor", "19": "Unknown"
+}
+
+ref.obs['cell_type'] = ref.obs['leiden'].map(cell_type_map).astype(str)
+```

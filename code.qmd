@@ -1,0 +1,539 @@
+---
+title: Spatial analysis of glioblastoma
+author: Siddharth Rajesh
+---
+
+## Loading the python libraries
+```{python}
+import scvi
+import scanpy as sc
+import squidpy as sq
+import scrublet as scr
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+pd.options.future.infer_string = False  # add this after your imports
+
+sc.settings.verbosity = 3
+sc.set_figure_params(dpi=80, facecolor="white")
+```
+
+## Loading the scRNA-seq data
+
+```{python}
+# Load CellBender-corrected filtered matrices for 3 primary and 1 recurrent GBM samples
+patient_1 = sc.read_10x_h5("results/cellbender/primary_tumor_001/primary_tumor_001_cellbender_filtered.h5")
+patient_2 = sc.read_10x_h5("results/cellbender/primary_tumor_002/primary_tumor_002_cellbender_filtered.h5")
+patient_3 = sc.read_10x_h5("results/cellbender/primary_tumor_003/primary_tumor_003_cellbender_filtered.h5")
+recurrent_1 = sc.read_10x_h5("results/cellbender/recurrent_tumor_001/recurrent_tumor_001_cellbender_filtered.h5")
+```
+
+### Fixing the gene names and adding in the metadata
+
+```{python}
+for adata in [patient_1, patient_2, patient_3, recurrent_1]:
+    adata.var_names_make_unique()   # Ensuring that the cell names remain unique
+
+# Assigning the sample column and condition column for later integration
+
+patient_1.obs["sample"] = "patient_001"
+patient_2.obs["sample"] = "patient_002"
+patient_3.obs["sample"] = "patient_003"
+recurrent_1.obs["sample"] = "recurrent_001"
+
+for a in [patient_1, patient_2, patient_3]:
+    a.obs["condition"] = "primary"
+recurrent_1.obs["condition"] = "recurrent"
+```
+
+## Run Scrublet to remove the doublets
+
+```{python}
+# Removing doublets that may have formed during the cell capture
+# Scrublet simulates doublets and assigns a score per cell; predicted_doublet=True cells are removed downstream
+for adata in [patient_1, patient_2, patient_3, recurrent_1]:
+    scrub = scr.Scrublet(adata.X)
+    adata.obs["doublet_score"], adata.obs['predicted_doublet'] = scrub.scrub_doublets()
+```
+
+## Concatenate all the samples into 1 AnnData object
+
+```{python}
+# Merge all 4 samples into a single AnnData; obs_names will be made unique to avoid collisions
+ref = sc.concat([patient_1, patient_2, patient_3, recurrent_1])
+```
+
+#### Filter out the doublets
+
+```{python}
+ref = ref[~ref.obs["predicted_doublet"]].copy()
+ref.obs_names_make_unique()     # Make the cell IDs unique
+```
+
+# Quality Control
+
+```{python}
+# Flag mitochondrial genes — high mt% indicates damaged/dying cells
+ref.var['mt'] = ref.var_names.str.startswith("MT-")
+sc.pp.calculate_qc_metrics(ref, qc_vars = ["mt"], inplace = True)
+```
+
+## Violin Plots
+
+```{python}
+# Visualize per-sample distributions of gene count, total UMI, and mt% before filtering
+sc.pl.violin(ref, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], groupby = 'sample', jitter = 0.5)
+```
+
+## Filtering out low quality cells and genes
+
+```{python}
+sc.pp.filter_cells(ref, min_genes=500)  # Filter out cells with < 500 genes
+sc.pp.filter_genes(ref, min_cells=15)   # Filter out genes that are expressed in less than 15 cells
+ref = ref[ref.obs.pct_counts_mt < 20].copy()    # Filter out cells that have mitochondrial content > 20%
+```
+
+#### Storing raw counts for cell2location
+
+```{python}
+# Cell2location requires raw integer counts — store before normalization
+ref.layers["counts"] = ref.X.copy()
+```
+
+## Normalizing the counts matrix and scaling
+
+```{python}
+sc.pp.normalize_total(ref, target_sum=1e-4)
+sc.pp.log1p(ref)
+ref.raw = ref   # Save normalized for plotting
+
+# Identify the 3000 most variable genes, computed per condition to reduce batch-driven HVG selection
+sc.pp.highly_variable_genes(ref, n_top_genes = 3000, batch_key='sample')
+sc.pp.pca(ref)         # PCA for initial dimensionality reduction
+```
+
+# Integrating samples using scVI
+
+```{python}
+# scVI learns a batch-corrected latent space across samples using a variational autoencoder
+if (os.path.exists('h5ad_files/scvi_ref.h5ad')):
+    ref = sc.read_h5ad('h5ad_files/scvi_ref.h5ad')
+else:
+    scvi.settings.seed = 42 # Seeding for reproducibility
+    scvi.model.SCVI.setup_anndata(ref, layer = 'counts', batch_key = 'sample')      # Copy our annData to the scVI model
+    vae = scvi.model.SCVI(ref, n_layers = 2, n_latent = 30) # Instantiate the VAE model
+    vae.train()     # Train the model on the scRNA data
+    ref.obsm['X_scVI'] = vae.get_latent_representations()   # Get the latent representation of cells used for clustering
+    ref.write_h5ad('h5ad_files/scvi_ref.h5ad')
+```
+
+
+## Calculating neigbours and umap
+
+```{python}
+# Build neighbor graph in scVI latent space and compute UMAP for visualization
+sc.pp.neighbors(ref, use_rep = "X_scVI")
+sc.tl.umap(ref)
+```
+
+### Running Leiden clustering
+
+```{python}
+# Base leiden for all the clusters
+sc.tl.leiden(ref, resolution = 0.5, key_added = 'leiden')
+
+# Resplit cluster 6 at higher resolution to resolve sub-populations
+sc.tl.leiden(ref, resolution=0.8, restrict_to = ("leiden", ['6']), key_added = 'leiden_resplit')
+
+# Looking at the differences between normal leiden split and leiden resplit for cluster 6 at higher resolution
+sc.pl.umap(ref, color = ['leiden', 'leiden_resplit'])
+
+# Plotting the UMAP to see the clustering differences across samples and condition
+sc.pl.umap(ref, color = ['leiden', 'condition', 'sample'])
+
+# Checking the violin plot again to confirm QC passed integration
+sc.pl.violin(ref, ['n_genes_by_counts', 'total_counts', 'pct_counts_mt'], groupby = 'sample', jitter = 0.5)
+```
+
+#### Checking the quality of clusters 12 and 14
+
+```{python}
+# Clusters 12 and 14 showed unusual QC profiles — inspect before annotation
+sc.pl.violin(ref[ref.obs.leiden.isin(['12', '14'])], [
+    "n_genes_by_counts", "total_counts", "pct_counts_mt"
+])
+```
+
+# Annotation
+
+## Dotplot of markers genes to annotate cells
+
+```{python}
+# Known GBM marker genes used to assign cell identity to each leiden cluster
+gbm_markers = {
+    "Tumor":            ["EGFR", "SOX2", "NES", "CDK4", "PDGFRA"],
+    "Microglia":        ["TMEM119", "P2RY12", "CX3CR1", "HEXB", "SALL1"],
+    "Macrophage":       ["CD68", "CD163", "MRC1", "CSF1R", "ITGAM"],
+    "T_cell":           ["CD3D", "CD3E", "CD8A", "CD4"],
+    "Treg":             ["FOXP3", "IL2RA", "CTLA4"],
+    "NK_cell":          ["GNLY", "NKG7", "KLRD1"],
+    "Oligodendrocyte":  ["MBP", "MOG", "PLP1", "OLIG1"],
+    "OPC":              ["PDGFRA", "OLIG2", "SOX10"],
+    "Astrocyte":        ["GFAP", "AQP4", "S100B", "ALDH1L1"],
+    "Endothelial":      ["PECAM1", "VWF", "CDH5", "CLDN5"],
+    "Pericyte":         ["PDGFRB", "RGS5", "ACTA2"]
+}
+
+sc.pl.dotplot(ref, gbm_markers, groupby='leiden', standard_scale = 'var')
+```
+
+### Identify the discriminating genes per cell type
+
+```{python}
+# UMAP overlaid with canonical marker genes to validate cluster assignments
+sc.pl.umap(
+    ref,
+    color=["EGFR", "TMEM119", "CD3D", "MBP", "GFAP", "PECAM1", "leiden"],
+    ncols = 3
+)
+```
+
+## Cell-type map to annotate each cluster
+
+### Assign cell types to each cluster
+
+```{python}
+# Manual annotation based on marker gene expression in the dotplot above
+cell_type_map = {
+    "0":  "Tumor", "1": "Tumor", "2": "Tumor",
+    "3":  "Microglia", "4": "OPC", "5": "Tumor",
+    "6":  "Tumor", "7":  "Unknown", "8": "Oligodendrocyte",
+    "9":  "CD8_T_cell", "10": "Oligodendrocyte", "11": "Macrophage",
+    "12": "Unknown", "13": "Tumor", "14": "Tumor",
+    "15": "Unknown", "16": "Unknown", "17": "Endothelial",
+    "18": "Tumor", "19": "Unknown"
+}
+
+ref.obs['cell_type'] = ref.obs['leiden'].map(cell_type_map).astype(str)
+```
+
+#### Sub-cluster for cluster 11 (Macrophage) for TAM subtypes
+
+```{python}
+# Cluster 11 is a mixed myeloid population — re-cluster at higher resolution to resolve TAM subtypes
+sub = ref[ref.obs["leiden"] == '11'].copy()
+sc.pp.neighbors(sub, use_rep = 'X_scVI')
+sc.tl.leiden(sub, resolution = 0.3, key_added='leiden_sub')
+sc.pl.dotplot(sub, [
+    "CD68", "CD163", "TMEM119", "P2RY12", "CD14", "FCGR3A",
+    "CX3CR1", "SALL1", "HEXB",   # homeostatic microglia
+    "SPP1", "APOE", "CCL2"        # TAM-specific
+], groupby = 'leiden_sub')
+
+sub_map = {
+    "0": "TAM_APOE",      # high APOE, CD163, SPP1 — immunosuppressive TAM
+    "1": "Monocyte",      # high CD14, FCGR3A, CX3CR1 — monocyte infiltrating
+    "2": "TAM_macrophage",# intermediate profile
+    "3": "TAM_APOE",      # high APOE, SPP1, CD14
+    "4": "TAM_SPP1",      # highest SPP1 — pro-tumorigenic TAM subtype
+}
+
+ref.obs.loc[ref.obs['leiden'] == "11", 'cell_type'] = sub.obs['leiden_sub'].map(sub_map).values
+
+# Removing the unknown clusters
+ref_clean = ref[~ref.obs['cell_type'].isin(["Unknown"])].copy()
+
+# Plot the UMAP again with the annotated sub-clusters
+sc.pl.umap(ref_clean, color='cell_type', legend_loc = 'on data')
+```
+
+##### Checkpoint the annData by saving it
+
+```{python}
+if os.path.exists('h5ad_files/annotated.h5ad'):
+    ref_clean = sc.read_h5ad("h5ad_files/annotated.h5ad")
+else:
+    ref_clean.write_h5ad("h5ad_files/annotated.h5ad")
+```
+
+# Load the spatial data
+
+```{python}
+# Load 10x Visium CytAssist output — includes tissue image and spatial barcodes
+spatial = sq.read.visium("results/spaceranger/GBM_CytAssist_outputs/outs")
+spatial.var_names_make_unique() # Remove any duplicated gene IDs
+```
+
+## Quality Control for the spatial data
+
+```{python}
+# Calculate QC metrics for spatial spots — mt% flags necrotic/low-quality regions
+spatial.var['mt'] = spatial.var_names.str.startswith('MT-')
+sc.pp.calculate_qc_metrics(spatial, qc_vars=['mt'], inplace = True)
+sq.pl.spatial_scatter(spatial, color='total_counts', library_id=list(spatial.uns["spatial"].keys())[0])
+```
+
+```{python}
+# Filter low-quality spots: keep only in-tissue spots with sufficient gene coverage and low mt%
+sp_qc = spatial.copy()
+sp_qc = sp_qc[sp_qc.obs["in_tissue"] == 1].copy()
+sp_qc = sp_qc[sp_qc.obs["n_genes_by_counts"] > 500].copy()
+sp_qc = sp_qc[sp_qc.obs["pct_counts_mt"] < 25].copy()
+print(f"Spots before: {spatial.n_obs}, after: {sp_qc.n_obs}")
+```
+
+###### Helper function for fixing arrow strings in annData object
+
+```{python}
+# Converts Arrow-backed string columns to Python objects — required for Cell2location compatibility
+def fix_arrow_strings(adata):
+        import pandas as pd
+        def convert_df(df):
+            for col in df.columns:
+                if pd.api.types.is_string_dtype(df[col]) and not pd.api.types.is_object_dtype(df[col]):
+                    df[col] = df[col].astype(object)
+            df.index = df.index.astype(str)
+            return df
+        adata.obs = convert_df(adata.obs)
+        adata.var = convert_df(adata.var)
+        adata.raw = None
+        return adata
+```
+
+#### Load the annotated scRNA-seq data and subset the data to genes in spatial data
+
+```{python}
+ref = sc.read_h5ad('h5ad_files/annotated.h5ad')
+
+# Subset to shared genes between scRNA-seq data and spatial data
+shared_genes = ref.var_names[ref.var_names.isin(sp_qc.var_names)]
+```
+
+## Run the RegressionModel in Cell2Location for estimating average mRNA expression signatures of cell types from single-cell/nucleus RNA-seq (scRNA-seq) data
+
+```{python}
+# RegressionModel learns cell-type-specific expression signatures from scRNA-seq
+# accounting for batch (sample) effects — output is used as input to Cell2location
+if os.path.exists("h5ad_files/ref_regression_c2l.h5ad"):
+    ref_c2l = sc.read_h5ad("h5ad_files/ref_regression_c2l.h5ad")
+else:
+    from cell2location.models import RegressionModel
+
+    ref_c2l = ref[:, shared_genes].copy()
+
+    # Use raw counts
+    ref_c2l.X = ref_c2l.layers['counts']
+
+    RegressionModel.setup_anndata(ref_c2l, batch_key = 'sample', labels_key = 'cell_type')
+
+    reg_model = RegressionModel(ref_c2l)
+    reg_model.train(max_epochs=250)
+
+    # Export posterior - no sample_df argument needed
+    ref_c2l = reg_model.export_posterior(
+        ref_c2l,
+        sample_kwargs = {"num_samples": 1000, 'batch_size': 2500}
+    )
+
+    ref_c2l = fix_arrow_strings(ref_c2l)
+    ref_c2l.write_h5ad("h5ad_files/ref_regression_c2l.h5ad")
+```
+
+#### Get cell type signatures and check that the model has worked
+
+```{python}
+# inf_aver is a gene x cell_type matrix of average expression — sanity check first 5 rows/cols
+inf_aver = ref_c2l.varm["means_per_cluster_mu_fg"][
+    [f"means_per_cluster_mu_fg_{ct}" for ct in ref_c2l.uns["mod"]["factor_names"]]
+].copy()
+inf_aver.columns = ref_c2l.uns["mod"]["factor_names"]
+
+inf_aver.iloc[0:5, 0:5]  # sanity check — should show gene x cell_type expression values
+```
+
+# Run Cell2Location to integrate the scRNA-seq data to the spatial data
+
+```{python}
+# Cell2location deconvolves each Visium spot into fractional cell type abundances
+# using the cell-type signatures from the RegressionModel above
+from cell2location.models import Cell2location
+
+if os.path.exists('h5ad_files/c2l_complete.h5ad'):
+    sp = sc.read_h5ad("h5ad_files/c2l_complete.h5ad")
+else:
+    sp_full = sc.read_10X_h5("results/spaceranger/GBM_CytAssist_outputs/outs/filtered_feature_bc_matrix.h5")
+    sp_full.var_names_make_unique()
+
+    # Split RNA and protein (antibody capture) modalities
+    sp_rna = full[:, full.var["feature_types"] == "Gene Expression"].copy()
+    sp_protein = full[:, full.var["feature_types"] == "Antibody Capture"].copy()
+
+    # Transfer spatial coordinates
+    sp_rna.obsm["spatial"] = spatial.obsm["spatial"]
+    sp_protein.obsm["spatial"] = spatial.obsm["spatial"]
+    sp_protein.uns["spatial"] = spatial.uns['spatial']
+
+    # Cell2Location uses RNA alone
+    sp = sp_rna[:, shared_genes].copy()
+    sp.X = sp.X         # Raw counts required
+
+    Cell2Location.setup_anndata(sp, batch_key = None)
+    c2l_model = Cell2Location(
+        sp,
+        cell_state_df=inf_aver,
+        N_cells_per_location = 10,   # Expected number of cells per Visium spot
+        detection_alpha = 20
+    )
+    c2l_model.train(max_epochs = 30000, batch_size = 2048, train_size = 1, lr=5e-4)
+
+    # q05 (5th percentile of posterior) used as a conservative estimate of cell abundance
+    sp = c2l_model.export_posterior(
+        sp, sample_kwargs={"num_samples": 1000, "batch_size": c2l_model.adata.n_obs}
+    )
+
+    sp.obs[sp.uns["mod"]["factor_names"]] = sp.obsm["q05_cell_abundance_w_sf"]
+
+    sp = fix_arrow_strings(sp)
+    sp_protein = fix_arrow_strings(sp_protein)
+
+    sp.write_h5ad('h5ad_files/c2l_complete.h5ad')
+    sp_protein.write_h5ad("h5ad_files/sp_protein.h5ad")
+```
+
+# Analysis
+
+## Spatial scatter of all cell types
+
+```{python}
+# Visualize estimated abundance of every cell type across the tissue section
+cell_types = sp.uns['mod']['factor_names']
+
+sq.pl.spatial_scatter(
+    sp,
+    color=cell_types,
+    ncols = 4,
+    size = 1.5,
+    img = False
+)
+```
+
+## Spatial scatter of individual cell types of interest
+
+```{python}
+# Focus on the key immune and tumor populations for the GBM TME story
+sq.pl.spatial_scatter(
+    sp,
+    color=["Tumor", "Microglia", "TAM_macrophage", "CD8_T_cell"],
+    ncols = 2,
+    size = 1.5
+)
+```
+
+### Compute the spatial neighborhood graph
+
+```{python}
+# Grid-based graph with 6 neighbors — connects each spot to its direct Visium neighbors
+sq.gr.spatial_neighbors(sp, coord_type='grid', n_neighs=6)
+```
+
+## Perform neighborhood enrichment
+
+```{python}
+# Check what's available in sp.obs
+print(sp.obs.columns.tolist())
+
+# Assign dominant cell type per spot based on highest Cell2location abundance
+sp.obs["cell_type"] = sp.obs[cell_types].idxmax(axis=1).astype('category')
+
+# Neighborhood enrichment tests whether cell types co-localize more than expected by chance
+sq.gr.nhood_enrichment(sp, cluster_key='cell_type')
+sq.pl.nhood_enrichment(sp, cluster_key='cell_type', figsize=(8, 8))
+```
+
+### Compute spatial co-occurrence probability
+
+```{python}
+import matplotlib as mpl
+mpl.rcParams["text.usetex"] = False
+mpl.rcParams["mathtext.default"] = "regular"
+
+# Rename for plot compatibility — LaTeX underscore causes rendering errors
+sp.obs["cell_type_plot"] = sp.obs["cell_type"].str.replace("CD8_T_cell", "CD8 T cell").astype("category")
+
+# Co-occurrence measures how often two cell types appear within the same spatial distance bin
+sq.gr.co_occurrence(sp, cluster_key = 'cell_type')
+sq.pl.co_occurrence(
+    sp,
+    cluster_key = 'cell_type',
+    clusters= ["Tumor", "TAM_macrophage", "CD8 T cell"]
+)
+```
+
+## Perform Ligand-Receptor analysis
+
+```{python}
+# Permutation-based LR test (Squidpy/CellPhoneDB) — identifies significant interactions
+# between spatially adjacent cell type pairs
+sq.gr.ligrec(
+    sp,
+    n_perms = 1000,
+    cluster_key = "cell_type_plot",
+    copy=False,
+    use_raw=False,
+    transmitter_params={"categories": "ligand"},
+    receiver_params={"categories": "receptor"}
+)
+
+# Filter to top 20 most significant interactions
+means = sp.uns["cell_type_plot_ligrec"]['means']
+pvalues = sp.uns["cell_type_plot_ligrec"]['pvalues']
+
+# Focus on Tumor as sender; key TME receivers are TAM, CD8 T cell, Microglia
+src = "Tumor"
+targets = ["TAM_macrophage", "CD8 T cell", "Microglia"]
+
+# Find top 20 L-R pairs by significance across all targets
+top_pairs = (
+    pd.concat([pvalues[(src, tgt)] for tgt in targets], axis=1)
+    .min(axis=1)                        # most significant across targets
+    .dropna()
+    .sort_values()
+    .head(20)
+    .index
+)
+
+# Subset the uns dict to only top pairs for a cleaner plot
+import copy
+sp_sub = sp.copy()
+for key in ["means", "pvalues", "metadata"]:
+    for pair in list(sp_sub.uns["cell_type_plot_ligrec"][key].keys()):
+        sp_sub.uns["cell_type_plot_ligrec"][key][pair] = \
+            sp_sub.uns["cell_type_plot_ligrec"][key][pair].loc[
+                sp_sub.uns["cell_type_plot_ligrec"][key][pair].index.isin(top_pairs)
+            ]
+
+ax = sq.pl.ligrec(
+    sp_sub,
+    cluster_key="cell_type_plot",
+    source_groups=src,
+    target_groups=targets,
+    alpha=0.05,
+    figsize=(10, 8),
+)
+
+# Fix legend overlapping axis labels
+fig = plt.gcf()
+fig.tight_layout(rect=[0, 0, 0.78, 1])  # reserve right margin for legend
+```
+
+## Compute Spatial Auto-correlation
+
+```{python}
+# Moran's I identifies genes whose expression is spatially structured (not randomly distributed)
+sq.gr.spatial_autocorr(sp, mode='moran')
+
+# Visualize the top 6 spatially variable genes on the tissue
+top_svgs = sp.uns['moranI'].head(20).index.tolist()
+sq.pl.spatial_scatter(sp, color=top_svgs[:11], ncols = 3, img =False)
+```

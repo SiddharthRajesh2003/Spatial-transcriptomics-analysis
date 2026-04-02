@@ -4,10 +4,10 @@ nextflow.enable.dsl = 2
 
 
 // Import modules
-include { FastQC } from './modules/fastqc.nf'
-include { CellRanger } from './modules/cellranger.nf'
-include { SpaceRanger } from './modules/spaceranger.nf'
-include { MultiQC } from './modules/multiqc.nf'
+include { FastQC } from './modules/fastqc/'
+include { CellRanger } from './modules/cellranger/'
+include { SpaceRanger } from './modules/spaceranger/'
+include { MultiQC } from './modules/multiqc/'
 
 def helpMessage() {
     log.info"""

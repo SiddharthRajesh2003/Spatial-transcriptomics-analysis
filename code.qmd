@@ -537,3 +537,11 @@ sq.gr.spatial_autocorr(sp, mode='moran')
 top_svgs = sp.uns['moranI'].head(20).index.tolist()
 sq.pl.spatial_scatter(sp, color=top_svgs[:11], ncols = 3, img =False)
 ```
+
+## Compute Ripley's L
+
+```{python}
+sq.gr.ripley(sp, cluster_key = 'cell_type_plot', mode='L')
+
+sq.pl.ripley(sp, cluster_key='cell_type_plot', mode='L')
+```

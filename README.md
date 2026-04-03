@@ -49,7 +49,7 @@ This pipeline processes data from **3 primary** and **1 recurrent** GBM patient 
 
 ### Stage 1 — Nextflow Preprocessing (`main.nf`)
 
-Runs on IU HPC (SLURM) using Apptainer containers.
+Runs on HPC (SLURM) using Apptainer containers.
 
 **Steps:**
 1. **FastQC** — Quality control on raw FASTQ files for all samples
@@ -64,7 +64,7 @@ sbatch run_pipeline.sh
 
 **Skip completed steps** (e.g. if Cell Ranger already ran):
 ```bash
-nextflow run main.nf -profile slurm --skip_cellranger true --skip_fastqc true
+nextflow run main.nf -profile slurm --skip_cellranger --skip_fastqc
 ```
 
 **Samplesheet formats:**
@@ -138,8 +138,6 @@ Intermediate results are saved to `h5ad_files/` to avoid recomputing expensive s
 ---
 
 ## HPC Configuration
-
-Runs on Indiana University's [Big Red 200](https://kb.iu.edu/d/apdp) HPC cluster under allocation `r00750`.
 
 | Process | CPUs | Memory | Time |
 |---|---|---|---|

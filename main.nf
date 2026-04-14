@@ -6,6 +6,7 @@ nextflow.enable.dsl = 2
 // Import modules
 include { FastQC } from './modules/fastqc/'
 include { CellRanger } from './modules/cellranger/'
+include { CellBender } from './modules/cellbender/'
 include { SpaceRanger } from './modules/spaceranger/'
 include { MultiQC } from './modules/multiqc/'
 
@@ -183,6 +184,10 @@ workflow {
         cellranger_reports = CellRanger.out.cellranger_out
             .map { _sample_id, outs_dir -> outs_dir.parent }
             .toList()
+        
+        CellBender(
+            CellRanger.out.raw_h5    
+        )
     }
 
     def skipSpaceRanger = actuallyskipSpaceRanger()

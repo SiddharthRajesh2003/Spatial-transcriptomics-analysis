@@ -545,3 +545,20 @@ sq.gr.ripley(sp, cluster_key = 'cell_type_plot', mode='L')
 
 sq.pl.ripley(sp, cluster_key='cell_type_plot', mode='L')
 ```
+
+## Compute Centrality Scores
+
+```{python}
+sq.gr.centrality_scores(sp, cluster_key = "cell_type_plot")
+
+# Plot each centrality score separately, stacked vertically
+# Results are stored in sp.uns — cell type is the index, scores are columns
+df = sp.uns["cell_type_plot_centrality_scores"]
+for score in df.columns:
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.barh(df.index, df[score])
+    ax.set_title(score.replace("_", " ").title())
+    ax.set_xlabel("Score")
+    plt.tight_layout()
+    plt.show()
+```

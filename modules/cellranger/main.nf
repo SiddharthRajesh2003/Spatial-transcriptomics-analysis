@@ -14,6 +14,7 @@ process CellRanger {
     
     output:
     tuple val(sample_id), path("${sample_id}_outputs/outs/"), emit: cellranger_out
+    tuple val(sample_id), path ()"${sample_id}_outputs/outs/raw_feature_bc_matrix.h5"), emit: raw_h5
     path("${sample_id}_outputs/outs/web_summary.html"), emit: web_summary
 
     script:

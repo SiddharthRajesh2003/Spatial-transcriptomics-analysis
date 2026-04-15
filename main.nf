@@ -185,6 +185,7 @@ workflow {
             .map { _sample_id, outs_dir -> outs_dir.parent }
             .toList()
         
+        // Run CellBender on CellRanger outputs to remove ambient RNA contamination
         CellBender(
             CellRanger.out.raw_h5    
         )

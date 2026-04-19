@@ -124,7 +124,7 @@ else:
     scvi.model.SCVI.setup_anndata(ref, layer = 'counts', batch_key = 'sample')      # Copy our annData to the scVI model
     vae = scvi.model.SCVI(ref, n_layers = 2, n_latent = 30) # Instantiate the VAE model
     vae.train()     # Train the model on the scRNA data
-    ref.obsm['X_scVI'] = vae.get_latent_representations()   # Get the latent representation of cells used for clustering
+    ref.obsm['X_scVI'] = vae.get_latent_representation()   # Get the latent representation of cells used for clustering
     ref.write_h5ad('h5ad_files/scvi_ref.h5ad')
 ```
 
@@ -215,7 +215,11 @@ cell_type_map = {
     "18": "Tumor", "19": "Unknown"
 }
 
-ref.obs['cell_type'] = ref.obs['leiden'].map(cell_type_map).astype(str)
+# Check for any leiden clusters not covered by cell_type_map
+missing = set(ref.obs['leiden'].unique()) - set(cell_type_map.keys())
+print(f"Leiden clusters missing from cell_type_map: {missing}")
+
+ref.obs['cell_type'] = ref.obs['leiden'].map(cell_type_map).fillna('Unknown').astype(str)
 ```
 
 #### Sub-cluster for cluster 11 (Macrophage) for TAM subtypes
@@ -231,21 +235,26 @@ sc.pl.dotplot(sub, [
     "SPP1", "APOE", "CCL2"        # TAM-specific
 ], groupby = 'leiden_sub')
 
+# Check actual sub-cluster IDs before mapping
+print(sub.obs['leiden_sub'].unique().tolist())
+
 sub_map = {
-    "0": "TAM_APOE",      # high APOE, CD163, SPP1 — immunosuppressive TAM
-    "1": "Monocyte",      # high CD14, FCGR3A, CX3CR1 — monocyte infiltrating
-    "2": "TAM_macrophage",# intermediate profile
-    "3": "TAM_APOE",      # high APOE, SPP1, CD14
-    "4": "TAM_SPP1",      # highest SPP1 — pro-tumorigenic TAM subtype
+    "0": "TAM_APOE",       # high APOE, CD163, SPP1 — immunosuppressive TAM
+    "1": "Monocyte",       # high CD14, FCGR3A, CX3CR1 — monocyte infiltrating
+    "2": "TAM_macrophage", # intermediate profile
 }
 
 ref.obs.loc[ref.obs['leiden'] == "11", 'cell_type'] = sub.obs['leiden_sub'].map(sub_map).values
 
+# Cast to object dtype first to avoid Arrow string incompatibility with fillna
+ref.obs['cell_type'] = ref.obs['cell_type'].astype(object).fillna('Unknown')
+
 # Removing the unknown clusters
 ref_clean = ref[~ref.obs['cell_type'].isin(["Unknown"])].copy()
 
-# Plot the UMAP again with the annotated sub-clusters
-sc.pl.umap(ref_clean, color='cell_type', legend_loc = 'on data')
+# Plot the UMAP again with the annotated sub-clusters — exclude nan cells
+ref_plot = ref_clean[ref_clean.obs['cell_type'].notna()].copy()
+sc.pl.umap(ref_plot, color='cell_type', legend_loc='right margin', legend_fontsize=8)
 ```
 
 ##### Checkpoint the annData by saving it
@@ -362,24 +371,11 @@ from cell2location.models import Cell2location
 if os.path.exists('h5ad_files/c2l_complete.h5ad'):
     sp = sc.read_h5ad("h5ad_files/c2l_complete.h5ad")
 else:
-    sp_full = sc.read_10X_h5("results/spaceranger/GBM_CytAssist_outputs/outs/filtered_feature_bc_matrix.h5")
-    sp_full.var_names_make_unique()
+    # Use QC-filtered spatial object subsetted to shared genes
+    sp = sp_qc[:, shared_genes].copy()
 
-    # Split RNA and protein (antibody capture) modalities
-    sp_rna = full[:, full.var["feature_types"] == "Gene Expression"].copy()
-    sp_protein = full[:, full.var["feature_types"] == "Antibody Capture"].copy()
-
-    # Transfer spatial coordinates
-    sp_rna.obsm["spatial"] = spatial.obsm["spatial"]
-    sp_protein.obsm["spatial"] = spatial.obsm["spatial"]
-    sp_protein.uns["spatial"] = spatial.uns['spatial']
-
-    # Cell2Location uses RNA alone
-    sp = sp_rna[:, shared_genes].copy()
-    sp.X = sp.X         # Raw counts required
-
-    Cell2Location.setup_anndata(sp, batch_key = None)
-    c2l_model = Cell2Location(
+    Cell2location.setup_anndata(sp, batch_key = None)
+    c2l_model = Cell2location(
         sp,
         cell_state_df=inf_aver,
         N_cells_per_location = 10,   # Expected number of cells per Visium spot
@@ -395,10 +391,7 @@ else:
     sp.obs[sp.uns["mod"]["factor_names"]] = sp.obsm["q05_cell_abundance_w_sf"]
 
     sp = fix_arrow_strings(sp)
-    sp_protein = fix_arrow_strings(sp_protein)
-
     sp.write_h5ad('h5ad_files/c2l_complete.h5ad')
-    sp_protein.write_h5ad("h5ad_files/sp_protein.h5ad")
 ```
 
 # Analysis
@@ -408,6 +401,15 @@ else:
 ```{python}
 # Visualize estimated abundance of every cell type across the tissue section
 cell_types = sp.uns['mod']['factor_names']
+
+# Rename stale checkpoint label to current convention
+if "TAM_microglia_derived" in sp.obs.columns:
+    sp.obs.rename(columns={"TAM_microglia_derived": "TAM_microglia"}, inplace=True)
+    sp.uns['mod']['factor_names'] = [
+        "TAM_microglia" if f == "TAM_microglia_derived" else f
+        for f in cell_types
+    ]
+    cell_types = sp.uns['mod']['factor_names']
 
 sq.pl.spatial_scatter(
     sp,
@@ -424,7 +426,8 @@ sq.pl.spatial_scatter(
 # Focus on the key immune and tumor populations for the GBM TME story
 sq.pl.spatial_scatter(
     sp,
-    color=["Tumor", "Microglia", "TAM_macrophage", "CD8_T_cell"],
+    color=["Tumor", "TAM_macrophage", 
+    "Microglia", "CD8_T_cell"],
     ncols = 2,
     size = 1.5
 )
@@ -462,12 +465,13 @@ mpl.rcParams["mathtext.default"] = "regular"
 sp.obs["cell_type_plot"] = sp.obs["cell_type"].str.replace("CD8_T_cell", "CD8 T cell").astype("category")
 
 # Co-occurrence measures how often two cell types appear within the same spatial distance bin
-sq.gr.co_occurrence(sp, cluster_key = 'cell_type')
+sq.gr.co_occurrence(sp, cluster_key = 'cell_type_plot')
 sq.pl.co_occurrence(
     sp,
-    cluster_key = 'cell_type',
+    cluster_key = 'cell_type_plot',
     clusters= ["Tumor", "TAM_macrophage", "CD8 T cell"]
 )
+
 ```
 
 ## Perform Ligand-Receptor analysis
@@ -489,9 +493,11 @@ sq.gr.ligrec(
 means = sp.uns["cell_type_plot_ligrec"]['means']
 pvalues = sp.uns["cell_type_plot_ligrec"]['pvalues']
 
-# Focus on Tumor as sender; key TME receivers are TAM, CD8 T cell, Microglia
+# Focus on Tumor as sender; filter targets to those present as dominant cell types
 src = "Tumor"
-targets = ["TAM_macrophage", "CD8 T cell", "Microglia"]
+available = sp.obs["cell_type_plot"].cat.categories.tolist()
+targets = [t for t in ["TAM_macrophage", "CD8 T cell", "Microglia"] if t in available]
+print(f"Active targets: {targets}")
 
 # Find top 20 L-R pairs by significance across all targets
 top_pairs = (

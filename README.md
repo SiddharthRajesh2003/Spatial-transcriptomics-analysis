@@ -4,6 +4,32 @@ End-to-end pipeline for processing and analyzing spatial and single-cell RNA-seq
 
 ---
 
+## Key Biological Findings
+
+Analysis of the GBM tumor microenvironment reveals **CD8 T cell spatial exclusion** as the dominant immune phenotype, with mechanistic support from ligand-receptor signaling.
+
+**Spatial architecture**
+- CD8 T cells are abundantly detected by deconvolution but show strong spatial avoidance of tumor regions (neighborhood enrichment z = −51.33), indicating active immune exclusion rather than absence.
+- TAMs (TAM_APOE subtype) co-localize with tumor, consistent with a pro-tumorigenic, lipid-associated myeloid niche.
+- Microglia occupy peri-tumoral regions and are spatially segregated from tumor core.
+
+**TAM sub-clustering (myeloid compartment)**
+Three sub-clusters identified from the myeloid population:
+- **TAM_APOE** — APOE-high, lipid-associated tumor-supportive TAMs
+- **TAM_macrophage** — SPP1-enriched infiltrating macrophage-like TAMs
+- **Monocyte** — CD14/FCGR3A-enriched monocyte-derived cells
+
+**Ligand-receptor interactions**
+- **SPP1 | TFRC** — dominant ECM-integrin axis active across multiple sender-receiver pairs
+- **JAG1 | NOTCH1** — tumor-to-microglia Notch signaling driving TAM reprogramming
+- **WNT5A | STAT3** — non-canonical Wnt signaling reinforcing immunosuppressive microglia polarization
+- **SFRP2 | FZD6** — Wnt antagonism potentially mediating CD8 T cell spatial exclusion
+
+**Spatially variable genes**
+Moran's I identifies tumor-intrinsic genes (e.g., SPP1) with high spatial autocorrelation, confirming structured TME organization rather than diffuse infiltration.
+
+---
+
 ## Project Overview
 
 This pipeline processes data from **3 primary** and **1 recurrent** GBM patient samples (GSE214966, scRNA-seq) alongside **1 Visium CytAssist** spatial transcriptomics slide ([10x Genomics Dataset](https://www.10xgenomics.com/datasets/gene-and-protein-expression-library-of-human-glioblastoma-cytassist-ffpe-2-standard)). The goal is to map cell-cell interactions in the GBM tumor microenvironment at spatial resolution.
@@ -149,12 +175,6 @@ Intermediate results are saved to `h5ad_files/` to avoid recomputing expensive s
 
 ---
 
-## Singularity / Apptainer
-
-See [singularity.md](singularity.md) for instructions on building and using the Apptainer containers for each module.
-
----
-
 ## Author
 
-Siddharth Rajesh — Krolab, Indiana University
+Siddharth Rajesh — Indiana University

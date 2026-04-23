@@ -450,7 +450,7 @@ print(sp.obs.columns.tolist())
 sp.obs["cell_type"] = sp.obs[cell_types].idxmax(axis=1).astype('category')
 
 # Neighborhood enrichment tests whether cell types co-localize more than expected by chance
-sq.gr.nhood_enrichment(sp, cluster_key='cell_type')
+sq.gr.nhood_enrichment(sp, cluster_key='cell_type', seed=42)
 sq.pl.nhood_enrichment(sp, cluster_key='cell_type', figsize=(8, 8))
 ```
 
@@ -486,7 +486,8 @@ sq.gr.ligrec(
     copy=False,
     use_raw=False,
     transmitter_params={"categories": "ligand"},
-    receiver_params={"categories": "receptor"}
+    receiver_params={"categories": "receptor"},
+    seed=42
 )
 
 # Filter to top 20 most significant interactions
@@ -525,7 +526,7 @@ ax = sq.pl.ligrec(
     source_groups=src,
     target_groups=targets,
     alpha=0.05,
-    figsize=(10, 8),
+    figsize=(10, 8)
 )
 
 # Fix legend overlapping axis labels
